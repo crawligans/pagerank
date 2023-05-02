@@ -15,6 +15,7 @@ import cis5550.jobs.Stemmer;
 
 public class PageRank {
     public static void run(FlameContext flameContext, String[] args) throws Exception {
+        flameContext.getKVS().persist("pageranks");
         if(args.length < 1 || args.length == 2){
             flameContext.output("FAIL");
             return;

@@ -9,6 +9,8 @@ import java.util.*;
 
 public class Indexer {
     public static void run(FlameContext flameContext, String[] args) throws Exception {
+        flameContext.getKVS().persist("idfRanks");
+        flameContext.getKVS().persist("index");
         FlamePairRDD cd = flameContext.fromTable("crawl", row -> row.get("url") + "," + row.get("page"))
                 .mapToPair(a -> {
                     int x = a.indexOf(',');
@@ -114,8 +116,12 @@ public class Indexer {
             return Collections.singletonList(new FlamePair(word, String.join(",", allUrls)));
         });
 
-        sortLinks.saveAsTable("index");
-        flameContext.getKVS().persist("index");
+
+        sortLinks.flatMapToPair(flamePair ->
+        {
+            flameContext.getKVS().put("index", flamePair._1(), "link", flamePair._2());
+            return Collections.emptyList();
+        });
 
         flameContext.output("OK");
     }
