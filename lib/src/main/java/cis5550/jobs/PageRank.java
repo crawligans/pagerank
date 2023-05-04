@@ -30,8 +30,10 @@ public class PageRank {
         System.out.println(threshold);
         FlamePairRDD stateTable = flameContext.fromTable("crawl", row -> row.get("url") + "," + row.get("page"))
                 .mapToPair(a -> {
+
                         int x = a.indexOf(',');
                         String url = a.substring(0, x);
+
                         String page = a.substring(x);
                         List<String> extracted = extractURLS(page);
                         List<String> normalisedExtracted = normaliseURLS(extracted, new URL(url));
@@ -45,6 +47,9 @@ public class PageRank {
             iterations++;
             transferTable = stateTable.flatMapToPair( (FlamePair flamePair) -> {
                 String srcURL = flamePair._1();
+                if(srcURL.equals("null") || srcURL == null){
+                    return Collections.emptyList();
+                }
                 String l = flamePair._2();
                 String[] splitSt = l.split(",", 3);
                 String[] links = splitSt[2].split(",");
@@ -58,7 +63,6 @@ public class PageRank {
                 assignedRanks.add(new FlamePair(srcURL, Double.toString(0.0)));
                 Double rank = decayFactor * currentRank / n;
                 for(String linkedURL : links){
-
                     if(seenURLS.contains(linkedURL) || linkedURL.isBlank()){
                         continue;
                     }
@@ -146,26 +150,7 @@ public class PageRank {
             String hostName = seedURL.getHost();
             String urlRedirect = seedURL.getPath();
             String portNo = Integer.toString(seedURL.getPort());
-            /*System.out.println("== " + defaultPort + " ==");
-            System.out.println("== " + protocol + " ==");
-            System.out.println("== " + hostName + " ==");
-            System.out.println("== " + urlRedirect + " ==");
-            System.out.println("== " + portNo + " ==");
-            String test_1 = urlList.get(0);
-            test_1 = "../.." + test_1 + "#abc";
-            String test_2 = "#abc";
-            String test_3 = "/one#mslin/two.html";
-            String test_4 = "blah.html#test";
-            String test_5 = "http://elsewhere.com/some.html";
 
-            List<String> tests = List.of(test_1, test_2, test_3, test_4, test_5);
-            for (String test : tests) {
-                String[] swat = URLParser.parseURL(test);
-                for (String s : swat) {
-                    System.out.print(s + " - ");
-                }
-                System.out.println();
-            }*/
             ArrayList<String> normalisedURLs = new ArrayList<>();
             urlList = urlList.stream()
                     .map(s -> s.replaceAll("(#(.*?)(?=/))|(#(.*?)\\z)", "")) // has internal links
