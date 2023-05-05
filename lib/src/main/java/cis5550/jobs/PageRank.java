@@ -35,8 +35,7 @@ public class PageRank {
                         .map(m -> m.group(1)).filter(Objects::nonNull)
                         .flatMap(props -> Arrays.stream(props.split("\\s+")))
                         .map(prop -> prop.split("=")).filter(prop -> prop.length >= 2)
-                        .filter(prop -> "href".equals(prop[0]))
-                        .map(prop -> prop[1].strip())
+                        .filter(prop -> "href".equals(prop[0])).map(prop -> prop[1].strip())
                         .filter(propV -> propV.matches("\".*\""))
                         .map(propV -> propV.substring(1, propV.length() - 1)).map(propV -> {
                             try {
@@ -58,35 +57,39 @@ public class PageRank {
         double n_converged = 0;
         do {
             iterations++;
-            state = state.flatMapToPair(p -> {
-                    String[] rankSplit = p._2().split(",", 3);
-                    if (rankSplit.length <= 2) {
-                        return Collections::emptyIterator;
-                    }
-                    String[] links = rankSplit[2].split(",");
-                    return () -> Stream.concat(Arrays.stream(links).map(l -> {
-                            try {
-                                return normalizeUrl(new URL(l)).toString();
-                            } catch (MalformedURLException e) {
-                                return null;
-                            }
-                        }).distinct().filter(Objects::nonNull).map(l -> new FlamePair(l,
-                            String.valueOf(d * Double.parseDouble(rankSplit[0]) / links.length))),
-                        Stream.of(new FlamePair(p._1(), "0.0"))).iterator();
-                }).foldByKey("0.0",
-                    (v1, v2) -> String.valueOf(Double.parseDouble(v1) + Double.parseDouble(v2)))
-                .join(state)
-                .flatMapToPair(p -> {
-                    String[] split = p._2().split(",", 4);
-                    return () -> Collections.singleton(new FlamePair(p._1(),
-                        String.join(",", String.valueOf(Double.parseDouble(split[0]) + s), split[1],
-                            split[3]))).iterator();
-                });
+            FlamePairRDD invRank = state.flatMapToPair(p -> {
+                String[] rankSplit = p._2().split(",", 3);
+                if (rankSplit.length <= 2) {
+                    return Collections::emptyIterator;
+                }
+                String[] links = rankSplit[2].split(",");
+                return () -> Stream.concat(Arrays.stream(links).map(l -> {
+                        try {
+                            return normalizeUrl(new URL(l)).toString();
+                        } catch (MalformedURLException e) {
+                            return null;
+                        }
+                    }).distinct().filter(Objects::nonNull).map(l -> new FlamePair(l,
+                        String.valueOf(d * Double.parseDouble(rankSplit[0]) / links.length))),
+                    Stream.of(new FlamePair(p._1(), "0.0"))).iterator();
+            });
+            FlamePairRDD sumedRanks = invRank.foldByKey("0.0",
+                (v1, v2) -> String.valueOf(Double.parseDouble(v1) + Double.parseDouble(v2)));
+            invRank.drop();
+            FlamePairRDD joined = sumedRanks.join(state);
+            sumedRanks.drop();
+            state.drop();
+            state = joined.flatMapToPair(p -> {
+                String[] split = p._2().split(",", 4);
+                return () -> Collections.singleton(new FlamePair(p._1(),
+                    String.join(",", String.valueOf(Double.parseDouble(split[0]) + s), split[1],
+                        split[3]))).iterator();
+            });
+            joined.drop();
             diffs = state.flatMap(p -> {
                 String[] split = p._2().split(",", 3);
-                return () -> Collections.singleton(
-                        String.valueOf(
-                            Math.abs(Double.parseDouble(split[0]) - Double.parseDouble(split[1]))))
+                return () -> Collections.singleton(String.valueOf(
+                        Math.abs(Double.parseDouble(split[0]) - Double.parseDouble(split[1]))))
                     .iterator();
             });
             n_converged = Double.parseDouble(
