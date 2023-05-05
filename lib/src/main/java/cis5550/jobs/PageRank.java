@@ -28,17 +28,20 @@ public class PageRank {
             return;
         }
 
-        boolean extraConverganceCriteria = args.length == 3;
+        boolean extraConverganceCriteria = args.length >= 2;
         final double threshold = Double.parseDouble(args[0].trim());
         final double decayFactor = 0.85;
         System.out.println(threshold);
         FlamePairRDD stateTable = flameContext.fromTable("crawl", row -> {
             try {
                 return "%s,1.0,1.0,%s".formatted(normalizeUrl(new URL(row.get("url"))),
-                    new Scanner(row.get("page")).findAll(anchorTag).map(m -> m.group(1))
+                    new Scanner(Objects.requireNonNullElse(row.get("page"), "")).findAll(anchorTag)
+                        .map(m -> m.group(1)).filter(Objects::nonNull)
                         .flatMap(props -> Arrays.stream(props.split("\\s+")))
-                        .map(prop -> prop.split("="))
-                        .filter(prop -> "href".equals(prop[0])).map(prop -> prop[1].strip())
+                        .map(prop -> prop.split("=")).filter(prop -> prop.length >= 2)
+                        .filter(prop -> "href".equals(prop[0]))
+                        .map(prop -> prop[1].strip())
+                        .filter(propV -> propV.matches("\".*\""))
                         .map(propV -> propV.substring(1, propV.length() - 1)).map(propV -> {
                             try {
                                 return normalizeUrl(new URL(new URL(row.get("url")), propV)).toString();
@@ -89,22 +92,18 @@ public class PageRank {
                 double liftS2 = Double.parseDouble(s2);
                 return Double.toString(liftS + liftS2);
             });
-            FlamePairRDD nextState = stateTable.join(transferTable).flatMapToPair((flamePair)->
-            {
+            FlamePairRDD nextState = stateTable.join(transferTable).flatMapToPair((flamePair) -> {
                 String n = flamePair._2();
-                String[] c = n.split(",");
-                ArrayList<String> links = new ArrayList<>();
-                int index = c.length - 1;
-
-                for(int i = 2; i < index; i++){
-                    links.add(c[i]);
-                }
-                String oldRank = c[0];
-                String newRank = c[index];
+                List<String> c = Arrays.asList(n.split(","));
+                int index = c.size() - 1;
+                List<String> links = c.subList(2, index);
+                String oldRank = c.get(0);
+                String newRank = c.get(index);
 
                 // current, prev, links, new
-                FlamePair fp  = new FlamePair(flamePair._1(),
-                        (Double.parseDouble(newRank) + (1 - decayFactor))+ "," + oldRank + "," + String.join(",", links));
+                FlamePair fp = new FlamePair(flamePair._1(),
+                    (Double.parseDouble(newRank) + (1 - decayFactor)) + "," + oldRank + ","
+                    + String.join(",", links));
                 return Collections.singleton(fp); // Add 0.15 from the rank source
             });
 
@@ -113,22 +112,23 @@ public class PageRank {
                 String[] clin = c.split(",", 3);
                 double rc = Double.parseDouble(clin[0]);
                 double rp = Double.parseDouble(clin[1]);
-                return Collections.singletonList(Double.toString(Math.abs(rp-rc)));
+                return Collections.singletonList(Double.toString(Math.abs(rp - rc)));
             });
             // Extra convergence criteria only set if args.length == 3
-            if(extraConverganceCriteria){
-                final double defRankDiff = Double.parseDouble(args[1]);
-                double  percentConv = Double.parseDouble(args[2]);
-                double defPercentConv = (percentConv > 0) && (percentConv < 1) ? percentConv : (percentConv / 100);
+            if (extraConverganceCriteria) {
+                final double defRankDiff = Double.parseDouble(args[0]);
+                double percentConv = Double.parseDouble(args[1]);
+                double defPercentConv =
+                    (percentConv > 0) && (percentConv < 1) ? percentConv : (percentConv / 100);
                 String totalConverged = diffTable.fold("0", (left, right) -> {
                     double difference = Double.parseDouble(right);
                     int currentCount = Integer.parseInt(left);
-                    if(difference < defRankDiff){
+                    if (difference < defRankDiff) {
                         currentCount++;
                     }
                     return Integer.toString(currentCount);
                 });
-                if(Integer.parseInt(totalConverged) >= defPercentConv * diffTable.count()){
+                if (Integer.parseInt(totalConverged) >= defPercentConv * diffTable.count()) {
                     break;
                 }
             }
@@ -163,33 +163,5 @@ public class PageRank {
         int port = url.getPort() < 0 ? url.getDefaultPort() : url.getPort();
         String file = url.getPath();
         return new URL(protocol, host, port, "".equals(file) ? "/" : file);
-    }
-
-    private static List<String> normaliseURLS(List<String> urlList, URL seedURL) {
-        return urlList.stream()
-            .map(s -> s.replaceAll("(#(.*?)(?=/))|(#(.*?)\\z)", "")) // has internal links
-            .filter(s -> {
-                for (String k : List.of(".txt", ".png", ".jpg", ".jpeg", ".gif")) {
-                    if (s.endsWith(k)) {
-                        return false;
-                    }
-                }
-                return true;
-            }).map(s -> {
-                try {
-                    return normalizeUrl(new URL(seedURL, s));
-                } catch (MalformedURLException e) {
-                    return null;
-                }
-            }).filter(Objects::nonNull).map(URL::toExternalForm).toList();
-    }
-
-    private static List<String> extractURLS(String content) {
-        return new Scanner(content).findAll(anchorTag).map(m -> m.group(1)).filter(Objects::nonNull)
-            .flatMap(props -> Arrays.stream(props.split("\\s+"))).map(prop -> prop.split("="))
-            .filter(prop -> prop.length >= 2).filter(prop -> "href".equals(prop[0]))
-            .map(prop -> prop[1].strip())
-            .filter(propV -> propV.startsWith("\"") && propV.endsWith("\""))
-            .map(propV -> propV.substring(1, propV.length() - 1)).toList();
     }
 }
