@@ -7,6 +7,7 @@ import cis5550.flame.FlameRDD;
 import cis5550.tools.Hasher;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Objects;
@@ -29,8 +30,10 @@ public class PageRank {
         double t = Double.parseDouble(args[0]);
         double percent = args.length >= 2 ? Integer.parseInt(args[1]) / 100.0 : 1;
         FlamePairRDD state = ctx.fromTable("crawl", row -> {
+            String url = Objects.requireNonNullElse(row.get("url"), "")
+                .replaceAll(",", URLEncoder.encode(","));
             try {
-                return "%s,1.0,1.0,%s".formatted(normalizeUrl(new URL(row.get("url"))),
+                return "%s,1.0,1.0,%s".formatted(normalizeUrl(new URL(url)),
                     new Scanner(Objects.requireNonNullElse(row.get("page"), "")).findAll(anchorTag)
                         .map(m -> m.group(1)).filter(Objects::nonNull)
                         .flatMap(props -> Arrays.stream(props.split("\\s+")))
@@ -39,13 +42,13 @@ public class PageRank {
                         .filter(propV -> propV.matches("\".*\""))
                         .map(propV -> propV.substring(1, propV.length() - 1)).map(propV -> {
                             try {
-                                return normalizeUrl(new URL(new URL(row.get("url")), propV)).toString();
+                                return normalizeUrl(new URL(new URL(url), propV)).toString();
                             } catch (MalformedURLException e) {
                                 return null;
                             }
                         }).filter(Objects::nonNull).collect(Collectors.joining(",")));
             } catch (MalformedURLException e) {
-                return row.get("url") + ",1.0,1.0,";
+                return (url.isBlank() ? "null" : url) + ",1.0,1.0,";
             }
         }).mapToPair(e -> {
             String[] s = e.split(",", 2);
@@ -77,8 +80,8 @@ public class PageRank {
                 (v1, v2) -> String.valueOf(Double.parseDouble(v1) + Double.parseDouble(v2)));
             invRank.drop();
             FlamePairRDD joined = sumedRanks.join(state);
-            sumedRanks.drop();
-            state.drop();
+            sumedRanks.drop(true);
+            state.drop(true);
             state = joined.flatMapToPair(p -> {
                 String[] split = p._2().split(",", 4);
                 return () -> Collections.singleton(new FlamePair(p._1(),
