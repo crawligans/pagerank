@@ -62,7 +62,6 @@ public class Indexer {
             KVSClient kvs = flameContext.getKVS();
             String urlHash = Hasher.hash(url);
             Row row = new Row(urlHash);
-            row.put("__url", url);
             counts.forEach((k, v) -> row.put(k, String.valueOf(v.size())));
             kvs.putRow("TF", row);
             return () -> counts.entrySet().stream().map(e -> new FlamePair(e.getKey(),
