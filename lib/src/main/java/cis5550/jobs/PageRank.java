@@ -4,35 +4,31 @@ import cis5550.flame.FlameContext;
 import cis5550.flame.FlamePair;
 import cis5550.flame.FlamePairRDD;
 import cis5550.flame.FlameRDD;
+import cis5550.tools.Hasher;
 import java.net.MalformedURLException;
 import java.net.URL;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
 import java.util.Objects;
 import java.util.Scanner;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class PageRank {
 
-    private static final Pattern anchorTag = Pattern.compile(
-        "<(?:a|img)((\\s+[-\\w]+=\"[^\"]*\")*)\\s*>");
+    private static final Pattern anchorTag = Pattern.compile("<a((\\s+[-\\w]+=\"[^\"]*\")*)\\s*>");
+    private static final double d = 0.85;
+    private static final double s = 0.15;
 
-    public static void run(FlameContext flameContext, String[] args) throws Exception {
-        flameContext.getKVS().persist("pageranks");
-        if (args.length < 1 || args.length == 2) {
-            flameContext.output("FAIL");
+    public static void run(FlameContext ctx, String[] args) throws Exception {
+        if (args.length < 1) {
+            ctx.output("PageRank <t>");
             return;
         }
-
-        boolean extraConverganceCriteria = args.length >= 2;
-        final double threshold = Double.parseDouble(args[0].trim());
-        final double decayFactor = 0.85;
-        System.out.println(threshold);
-        FlamePairRDD stateTable = flameContext.fromTable("crawl", row -> {
+        double t = Double.parseDouble(args[0]);
+        double percent = args.length >= 2 ? Integer.parseInt(args[1]) / 100.0 : 1;
+        FlamePairRDD state = ctx.fromTable("crawl", row -> {
             try {
                 return "%s,1.0,1.0,%s".formatted(normalizeUrl(new URL(row.get("url"))),
                     new Scanner(Objects.requireNonNullElse(row.get("page"), "")).findAll(anchorTag)
@@ -56,105 +52,59 @@ public class PageRank {
             String[] s = e.split(",", 2);
             return new FlamePair(s[0], s[1]);
         });
-        FlamePairRDD transferTable;
 
         int iterations = 0;
-        while (true) {
+        FlameRDD diffs;
+        double n_converged = 0;
+        do {
             iterations++;
-            transferTable = stateTable.flatMapToPair((FlamePair flamePair) -> {
-                String srcURL = flamePair._1();
-                if (srcURL.equals("null") || srcURL.isBlank()) {
-                    return Collections::emptyIterator;
-                }
-                String l = flamePair._2();
-                String[] splitSt = l.split(",", 3);
-                String[] links = splitSt[2].split(",");
-
-                int n = links.length;
-                // current,prev, links
-                // int n = splitSt.length-2;
-                double currentRank = Double.parseDouble(splitSt[0]);
-                ArrayList<FlamePair> assignedRanks = new ArrayList<>();
-                HashSet<String> seenURLS = new HashSet<>();
-                assignedRanks.add(new FlamePair(srcURL, "0.0"));
-                double rank = decayFactor * currentRank / n;
-                for (String linkedURL : links) {
-                    if (seenURLS.contains(linkedURL) || linkedURL.isBlank()) {
-                        continue;
+            state = state.flatMapToPair(p -> {
+                    String[] rankSplit = p._2().split(",", 3);
+                    if (rankSplit.length <= 2) {
+                        return Collections::emptyIterator;
                     }
-                    assignedRanks.add(new FlamePair(linkedURL, Double.toString(rank)));
-                    seenURLS.add(linkedURL);
-                    //System.out.println(splitSt[i] + "," + rank);
-                }
-                return assignedRanks;
-            }).foldByKey("0.0", (String s, String s2) -> {
-                double liftS = Double.parseDouble(s);
-                double liftS2 = Double.parseDouble(s2);
-                return Double.toString(liftS + liftS2);
-            });
-            FlamePairRDD nextState = stateTable.join(transferTable).flatMapToPair((flamePair) -> {
-                String n = flamePair._2();
-                List<String> c = Arrays.asList(n.split(","));
-                int index = c.size() - 1;
-                List<String> links = c.subList(2, index);
-                String oldRank = c.get(0);
-                String newRank = c.get(index);
-
-                // current, prev, links, new
-                FlamePair fp = new FlamePair(flamePair._1(),
-                    (Double.parseDouble(newRank) + (1 - decayFactor)) + "," + oldRank + ","
-                    + String.join(",", links));
-                return Collections.singleton(fp); // Add 0.15 from the rank source
-            });
-
-            FlameRDD diffTable = nextState.flatMap(sd -> {
-                String c = sd._2();
-                String[] clin = c.split(",", 3);
-                double rc = Double.parseDouble(clin[0]);
-                double rp = Double.parseDouble(clin[1]);
-                return Collections.singletonList(Double.toString(Math.abs(rp - rc)));
-            });
-            // Extra convergence criteria only set if args.length == 3
-            if (extraConverganceCriteria) {
-                final double defRankDiff = Double.parseDouble(args[0]);
-                double percentConv = Double.parseDouble(args[1]);
-                double defPercentConv =
-                    (percentConv > 0) && (percentConv < 1) ? percentConv : (percentConv / 100);
-                String totalConverged = diffTable.fold("0", (left, right) -> {
-                    double difference = Double.parseDouble(right);
-                    int currentCount = Integer.parseInt(left);
-                    if (difference < defRankDiff) {
-                        currentCount++;
-                    }
-                    return Integer.toString(currentCount);
+                    String[] links = rankSplit[2].split(",");
+                    return () -> Stream.concat(Arrays.stream(links).map(l -> {
+                            try {
+                                return normalizeUrl(new URL(l)).toString();
+                            } catch (MalformedURLException e) {
+                                return null;
+                            }
+                        }).distinct().filter(Objects::nonNull).map(l -> new FlamePair(l,
+                            String.valueOf(d * Double.parseDouble(rankSplit[0]) / links.length))),
+                        Stream.of(new FlamePair(p._1(), "0.0"))).iterator();
+                }).foldByKey("0.0",
+                    (v1, v2) -> String.valueOf(Double.parseDouble(v1) + Double.parseDouble(v2)))
+                .join(state)
+                .flatMapToPair(p -> {
+                    String[] split = p._2().split(",", 4);
+                    return () -> Collections.singleton(new FlamePair(p._1(),
+                        String.join(",", String.valueOf(Double.parseDouble(split[0]) + s), split[1],
+                            split[3]))).iterator();
                 });
-                if (Integer.parseInt(totalConverged) >= defPercentConv * diffTable.count()) {
-                    break;
-                }
-            }
-
-            String lca = diffTable.fold("0.0", (left, right) -> {
-                double acc = Double.parseDouble(left);
-                double val = Double.parseDouble(right);
-                return Double.toString(Math.max(acc, val));
+            diffs = state.flatMap(p -> {
+                String[] split = p._2().split(",", 3);
+                return () -> Collections.singleton(
+                        String.valueOf(
+                            Math.abs(Double.parseDouble(split[0]) - Double.parseDouble(split[1]))))
+                    .iterator();
             });
-           if(Double.parseDouble(lca) < threshold){
-               break;
-           }
+            n_converged = Double.parseDouble(
+                diffs.flatMap(v -> Collections.singleton(Double.parseDouble(v) < t ? "1" : "0"))
+                    .fold("0",
+                        (v1, v2) -> String.valueOf(Integer.parseInt(v1) + Integer.parseInt(v2))));
+        } while (n_converged <= diffs.count() * percent - 1);
 
-           stateTable = nextState;
-        }
-        System.out.println("Converged in: " + iterations + " iterations");
-        stateTable.flatMapToPair(flamePair -> {
-            String url = flamePair._1();
-            String right = flamePair._2();
-            int i = right.indexOf(",");
-            double rank = Double.parseDouble(right.substring(0, i));
-            flameContext.getKVS().put("pageranks", url, "rank", Double.toString(rank));
-            return Collections.emptyList();
+        ctx.getKVS().persist("pageranks");
+        state.flatMapToPair(p -> {
+            String[] split = p._2().split(",", 2);
+            String hash = Hasher.hash(p._1());
+            ctx.getKVS().put("pageranks", hash, "url", p._1());
+            ctx.getKVS().put("pageranks", hash, "rank", split[0]);
+            return Collections::emptyIterator;
         });
 
-        flameContext.output("OK");
+        ctx.output("# iters: " + iterations);
     }
 
     public static URL normalizeUrl(URL url) throws MalformedURLException {
