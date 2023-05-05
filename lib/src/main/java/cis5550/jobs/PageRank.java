@@ -4,51 +4,64 @@ import cis5550.flame.FlameContext;
 import cis5550.flame.FlamePair;
 import cis5550.flame.FlamePairRDD;
 import cis5550.flame.FlameRDD;
-import cis5550.tools.URLParser;
-
+import java.net.MalformedURLException;
 import java.net.URL;
-import java.util.*;
-import java.util.regex.Matcher;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Scanner;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import cis5550.jobs.Stemmer;
 
 public class PageRank {
+
+    private static final Pattern anchorTag = Pattern.compile(
+        "<(?:a|img)((\\s+[-\\w]+=\"[^\"]*\")*)\\s*>");
+
     public static void run(FlameContext flameContext, String[] args) throws Exception {
         flameContext.getKVS().persist("pageranks");
-        if(args.length < 1 || args.length == 2){
+        if (args.length < 1 || args.length == 2) {
             flameContext.output("FAIL");
             return;
         }
 
-        boolean extraConverganceCriteria = false;
-        if(args.length == 3){
-            extraConverganceCriteria = true;
-        }
+        boolean extraConverganceCriteria = args.length == 3;
         final double threshold = Double.parseDouble(args[0].trim());
         final double decayFactor = 0.85;
         System.out.println(threshold);
-        FlamePairRDD stateTable = flameContext.fromTable("crawl", row -> row.get("url") + "," + row.get("page"))
-                .mapToPair(a -> {
-
-                        int x = a.indexOf(',');
-                        String url = a.substring(0, x);
-
-                        String page = a.substring(x);
-                        List<String> extracted = extractURLS(page);
-                        List<String> normalisedExtracted = normaliseURLS(extracted, new URL(url));
-                        String allLinks = String.join(",", normalisedExtracted);
-                        return new FlamePair(url, "1.0,1.0," + allLinks);
-                });
+        FlamePairRDD stateTable = flameContext.fromTable("crawl", row -> {
+            try {
+                return "%s,1.0,1.0,%s".formatted(normalizeUrl(new URL(row.get("url"))),
+                    new Scanner(row.get("page")).findAll(anchorTag).map(m -> m.group(1))
+                        .flatMap(props -> Arrays.stream(props.split("\\s+")))
+                        .map(prop -> prop.split("="))
+                        .filter(prop -> "href".equals(prop[0])).map(prop -> prop[1].strip())
+                        .map(propV -> propV.substring(1, propV.length() - 1)).map(propV -> {
+                            try {
+                                return normalizeUrl(new URL(new URL(row.get("url")), propV)).toString();
+                            } catch (MalformedURLException e) {
+                                return null;
+                            }
+                        }).filter(Objects::nonNull).collect(Collectors.joining(",")));
+            } catch (MalformedURLException e) {
+                return row.get("url") + ",1.0,1.0,";
+            }
+        }).mapToPair(e -> {
+            String[] s = e.split(",", 2);
+            return new FlamePair(s[0], s[1]);
+        });
         FlamePairRDD transferTable;
 
         int iterations = 0;
-        while(true){
+        while (true) {
             iterations++;
-            transferTable = stateTable.flatMapToPair( (FlamePair flamePair) -> {
+            transferTable = stateTable.flatMapToPair((FlamePair flamePair) -> {
                 String srcURL = flamePair._1();
-                if(srcURL.equals("null") || srcURL == null){
-                    return Collections.emptyList();
+                if (srcURL.equals("null") || srcURL.isBlank()) {
+                    return Collections::emptyIterator;
                 }
                 String l = flamePair._2();
                 String[] splitSt = l.split(",", 3);
@@ -59,14 +72,14 @@ public class PageRank {
                 // int n = splitSt.length-2;
                 double currentRank = Double.parseDouble(splitSt[0]);
                 ArrayList<FlamePair> assignedRanks = new ArrayList<>();
-                HashSet<String> seenURLS = new HashSet<String>();
-                assignedRanks.add(new FlamePair(srcURL, Double.toString(0.0)));
-                Double rank = decayFactor * currentRank / n;
-                for(String linkedURL : links){
-                    if(seenURLS.contains(linkedURL) || linkedURL.isBlank()){
+                HashSet<String> seenURLS = new HashSet<>();
+                assignedRanks.add(new FlamePair(srcURL, "0.0"));
+                double rank = decayFactor * currentRank / n;
+                for (String linkedURL : links) {
+                    if (seenURLS.contains(linkedURL) || linkedURL.isBlank()) {
                         continue;
                     }
-                    assignedRanks.add(new FlamePair(linkedURL, rank.toString()));
+                    assignedRanks.add(new FlamePair(linkedURL, Double.toString(rank)));
                     seenURLS.add(linkedURL);
                     //System.out.println(splitSt[i] + "," + rank);
                 }
@@ -133,7 +146,7 @@ public class PageRank {
         }
         System.out.println("Converged in: " + iterations + " iterations");
         stateTable.flatMapToPair(flamePair -> {
-            String url  = flamePair._1();
+            String url = flamePair._1();
             String right = flamePair._2();
             int i = right.indexOf(",");
             double rank = Double.parseDouble(right.substring(0, i));
@@ -143,96 +156,40 @@ public class PageRank {
 
         flameContext.output("OK");
     }
-    private static List<String> normaliseURLS(List<String> urlList, URL seedURL) {
-        try {
-            String defaultPort = Integer.toString(seedURL.getDefaultPort());
-            String protocol = seedURL.getProtocol() + "://";
-            String hostName = seedURL.getHost();
-            String urlRedirect = seedURL.getPath();
-            String portNo = Integer.toString(seedURL.getPort());
 
-            ArrayList<String> normalisedURLs = new ArrayList<>();
-            urlList = urlList.stream()
-                    .map(s -> s.replaceAll("(#(.*?)(?=/))|(#(.*?)\\z)", "")) // has internal links
-                    .filter(s -> {
-                        for(String k : List.of(".txt", ".png", ".jpg", ".jpeg", ".gif")){
-                            if(s.endsWith(k)) return false;
-                        }
-                        return true;
-                    })
-                    .collect(Collectors.toList());
-            for (String url : urlList) {
-                //path leads elsewhere
-                if(url.startsWith("http")){
-                    String[] swa = URLParser.parseURL(url);
-                    if(swa[2] == null){
-                        swa[2] = defaultPort;
-                    }
-                    normalisedURLs.add(swa[0] + "://" + swa[1] + ":" + swa[2] + swa[3]);
-                    continue;
-                }
-
-                // path is relative
-                if (url.startsWith("..")) {
-                    String[] str = urlRedirect.split("/");
-                    String[] sl = url.split("/");
-                    int i = str.length - 1;
-
-                    int j = 0;
-                    for(; i > 0; i--){
-                        if(j <= sl.length - 1){
-                            if(!sl[j].equals("..")){
-                                break;
-                            }
-                            j++;
-                        }else{
-                            break;
-                        }
-                    }
-                    StringBuilder sb = new StringBuilder();
-                    if(i == 0){
-                        sb.append("/");
-                    }else{
-                        for(int k = 1; k <= i-1; k++){
-                            sb.append("/"+str[k]);
-                        }
-                        for(int k = j; k < sl.length; k++){
-                            sb.append("/" + sl[k]);
-                        }
-                    }
-                    url = sb.toString();
-
-                }
-                // is absolute
-                if(url.startsWith("/")){
-                    url = protocol + hostName + ":" + portNo + url;
-                }else{
-                    String substr = urlRedirect.substring(0, urlRedirect.lastIndexOf('/'));
-                    url = protocol + hostName + ":" + portNo + substr + "/" + url;
-                }
-                normalisedURLs.add(url);
-            }
-            return normalisedURLs;
-        }catch(Exception e){
-            e.printStackTrace();
-        }
-        return null;
+    public static URL normalizeUrl(URL url) throws MalformedURLException {
+        String protocol = url.getProtocol();
+        String host = url.getHost();
+        int port = url.getPort() < 0 ? url.getDefaultPort() : url.getPort();
+        String file = url.getPath();
+        return new URL(protocol, host, port, "".equals(file) ? "/" : file);
     }
-    private static List<String> extractURLS(String content) {
-        Pattern pattern = Pattern.compile("<[^/](.*?)>");
-        Matcher m = pattern.matcher(content);
-        HashSet<String> urlList = new HashSet<String>();
-        while(m.find()){
 
-            String entered = content.substring(m.start()+1, m.end());
-            String[] sre = entered.split(" ");
-
-            if(sre[0].equalsIgnoreCase("a")){
-                if(sre[1].startsWith("href")){
-                    urlList.add(sre[1].substring(sre[1].indexOf("\"")+1, sre[1].length()-2));
+    private static List<String> normaliseURLS(List<String> urlList, URL seedURL) {
+        return urlList.stream()
+            .map(s -> s.replaceAll("(#(.*?)(?=/))|(#(.*?)\\z)", "")) // has internal links
+            .filter(s -> {
+                for (String k : List.of(".txt", ".png", ".jpg", ".jpeg", ".gif")) {
+                    if (s.endsWith(k)) {
+                        return false;
+                    }
                 }
-            }
-        }
-        return urlList.stream().collect(Collectors.toList());
+                return true;
+            }).map(s -> {
+                try {
+                    return normalizeUrl(new URL(seedURL, s));
+                } catch (MalformedURLException e) {
+                    return null;
+                }
+            }).filter(Objects::nonNull).map(URL::toExternalForm).toList();
+    }
+
+    private static List<String> extractURLS(String content) {
+        return new Scanner(content).findAll(anchorTag).map(m -> m.group(1)).filter(Objects::nonNull)
+            .flatMap(props -> Arrays.stream(props.split("\\s+"))).map(prop -> prop.split("="))
+            .filter(prop -> prop.length >= 2).filter(prop -> "href".equals(prop[0]))
+            .map(prop -> prop[1].strip())
+            .filter(propV -> propV.startsWith("\"") && propV.endsWith("\""))
+            .map(propV -> propV.substring(1, propV.length() - 1)).toList();
     }
 }

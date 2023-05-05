@@ -1,0 +1,4 @@
+Manifest-Version: 1.0
+Main-Class: 
+Class-Path: kvs.jar flame.jar kvs.jar flame.jar
+
