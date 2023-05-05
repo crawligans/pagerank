@@ -4,8 +4,8 @@ import cis5550.flame.FlameContext;
 import cis5550.flame.FlamePair;
 import cis5550.flame.FlamePairRDD;
 import cis5550.kvs.KVSClient;
+import cis5550.kvs.Row;
 import cis5550.tools.Hasher;
-import java.io.IOException;
 import java.net.URLEncoder;
 import java.util.Arrays;
 import java.util.Collections;
@@ -17,19 +17,15 @@ import java.util.Vector;
 
 public class Indexer {
     public static void run(FlameContext flameContext, String[] args) throws Exception {
-        flameContext.getKVS().persist("IDF");
-        flameContext.getKVS().persist("TF");
-        flameContext.getKVS().persist("index");
         FlamePairRDD cd = flameContext.fromTable("crawl",
                 row -> row.get("url").replaceAll(",", URLEncoder.encode(",")) + "," + row.get("page"))
             .mapToPair(a -> {
-                int x = a.indexOf(',');
-                String url = a.substring(0, x);
-                String page = a.substring(x);
-                return new FlamePair(url, page);
+                String[] x = a.split(",", 2);
+                return new FlamePair(x[0], x[1]);
             });
         final long totalDocuments = flameContext.getKVS().count("crawl");
 
+        flameContext.getKVS().persist("TF");
         FlamePairRDD fullIndex = cd.flatMapToPair((FlamePair fp) -> {
             String url = fp._1();
             String page = fp._2();
@@ -59,27 +55,29 @@ public class Indexer {
                         v = new Vector<>();
                     }
                     v.add(finalI);
-                    return null;
+                    return v;
                 });
             }
 
             KVSClient kvs = flameContext.getKVS();
             String urlHash = Hasher.hash(url);
-
-            return () -> counts.entrySet().parallelStream().peek(e -> {
-                try {
-                    kvs.put("TF", urlHash, "__url", url);
-                    kvs.put("TF", urlHash, e.getKey(), String.valueOf(e.getValue().size()));
-                } catch (IOException ignored) {
-                }
-            }).map(e -> new FlamePair(e.getKey(), String.join(" ",
-                () -> e.getValue().stream().map(String::valueOf).map(CharSequence.class::cast)
-                    .iterator()))).iterator();
+            Row row = new Row(urlHash);
+            row.put("__url", url);
+            counts.forEach((k, v) -> row.put(k, String.valueOf(v.size())));
+            kvs.putRow("TF", row);
+            return () -> counts.entrySet().stream().map(e -> new FlamePair(e.getKey(),
+                url + ":" + String.join(" ",
+                    () -> e.getValue().stream().map(String::valueOf).map(CharSequence.class::cast)
+                        .iterator()))).iterator();
         });
+        cd.drop();
         FlamePairRDD reversedIndex = fullIndex.foldByKey("",
             (s, s2) -> s.isBlank() ? s2 : s + "," + s2);
+        fullIndex.drop();
 
         // Sorting
+        flameContext.getKVS().persist("IDF");
+        flameContext.getKVS().persist("index");
         FlamePairRDD sortLinks = reversedIndex.flatMapToPair((flamePair) -> {
             String word = flamePair._1();
             String[] urls = flamePair._2().split(",");
@@ -91,14 +89,13 @@ public class Indexer {
             Double idf =
                 totalDocuments != 0 ? Math.log10(((double) totalDocuments) / docFrequency) : 0;
             flameContext.getKVS().put("IDF", word, "IDF", String.valueOf(idf));
+            FlamePair sortedPair = new FlamePair(word, String.join(",", urls));
+            flameContext.getKVS().put("index", sortedPair._1(), "link", sortedPair._2());
 
-            return Collections.singletonList(new FlamePair(word, String.join(",", urls)));
+            return Collections.singletonList(sortedPair);
         });
-
-        sortLinks.flatMapToPair(flamePair -> {
-            flameContext.getKVS().put("index", flamePair._1(), "link", flamePair._2());
-            return Collections::emptyIterator;
-        });
+        sortLinks.drop();
+        reversedIndex.drop();
 
         flameContext.output("OK");
     }
