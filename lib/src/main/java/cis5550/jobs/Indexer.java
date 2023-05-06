@@ -1,38 +1,42 @@
 package cis5550.jobs;
 
 import cis5550.flame.FlameContext;
+import cis5550.flame.FlameContextImpl;
 import cis5550.flame.FlamePair;
-import cis5550.flame.FlamePairRDD;
 import cis5550.kvs.KVSClient;
 import cis5550.kvs.Row;
 import cis5550.tools.Hasher;
+import cis5550.tools.Logger;
+import java.io.IOException;
 import java.net.URLEncoder;
-import java.util.Arrays;
-import java.util.Collections;
+import java.nio.charset.StandardCharsets;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Vector;
 
 public class Indexer {
-    public static void run(FlameContext flameContext, String[] args) throws Exception {
-        FlamePairRDD cd = flameContext.fromTable("crawl",
-                row -> row.get("url").replaceAll(",", URLEncoder.encode(",")) + "," + row.get("page"))
-            .mapToPair(a -> {
-                String[] x = a.split(",", 2);
-                return new FlamePair(x[0], x[1]);
-            });
-        final long totalDocuments = flameContext.getKVS().count("crawl");
 
+    private static Logger logger = Logger.getLogger(Indexer.class);
+
+    public static void run(FlameContext flameContext, String[] args) throws Exception {
+        final long totalDocuments = flameContext.getKVS().count("crawl");
+        FlameContextImpl ctx = (FlameContextImpl) flameContext;
         flameContext.getKVS().persist("TF");
-        FlamePairRDD fullIndex = cd.flatMapToPair((FlamePair fp) -> {
-            String url = fp._1();
-            String page = fp._2();
+        flameContext.fromTable("crawl", crawlRow -> {
+            String url = Optional.ofNullable(crawlRow.get("url"))
+                .map(l -> l.replaceAll(",", URLEncoder.encode(",", StandardCharsets.UTF_8)))
+                .orElse(null);
+            String page = crawlRow.get("page");
+
+            if (url == null || page == null) {
+                return "";
+            }
 
             String simplifiedPage = page.replaceAll("<[^>]*>", " ")
                 .replaceAll("[.,:;!?’\"()-]", " ");
-            Vector<FlamePair> fpList = new Vector<>();
             Map<String, List<Integer>> counts = new HashMap<>();
             String[] pageContent = simplifiedPage.split("(\\W)+");
             for (int i = 0; i < pageContent.length; i++) {
@@ -63,38 +67,43 @@ public class Indexer {
             String urlHash = Hasher.hash(url);
             Row row = new Row(urlHash);
             counts.forEach((k, v) -> row.put(k, String.valueOf(v.size())));
-            kvs.putRow("TF", row);
-            return () -> counts.entrySet().stream().map(e -> new FlamePair(e.getKey(),
-                url + ":" + String.join(" ",
-                    () -> e.getValue().stream().map(String::valueOf).map(CharSequence.class::cast)
-                        .iterator()))).iterator();
-        });
-        cd.drop();
-        FlamePairRDD reversedIndex = fullIndex.foldByKey("",
-            (s, s2) -> s.isBlank() ? s2 : s + "," + s2);
-        fullIndex.drop();
+            try {
+                kvs.putRow("TF", row);
+            } catch (IOException e) {
+                logger.error(e.getMessage(), e);
+            }
+
+            try {
+                ctx.parallelizePairs("indexUnsorted", counts.entrySet().stream().map(
+                    e -> new FlamePair(e.getKey(), url + ":" + String.join(" ",
+                        () -> e.getValue().stream().map(String::valueOf)
+                            .map(CharSequence.class::cast).iterator()))));
+            } catch (Exception e) {
+                logger.error(e.getMessage(), e);
+            }
+            return "";
+        }).drop();
 
         // Sorting
         flameContext.getKVS().persist("IDF");
         flameContext.getKVS().persist("index");
-        FlamePairRDD sortLinks = reversedIndex.flatMapToPair((flamePair) -> {
-            String word = flamePair._1();
-            String[] urls = flamePair._2().split(",");
-            Arrays.sort(urls, new URLComparator());
-
+        flameContext.fromTable("indexUnsorted", row -> {
+            String word = row.key();
+            String[] urls = row.columns().stream().map(row::get).sorted(new URLComparator())
+                .toArray(String[]::new);
             int docFrequency = urls.length;
             assert docFrequency != 0;
 
             Double idf =
                 totalDocuments != 0 ? Math.log10(((double) totalDocuments) / docFrequency) : 0;
-            flameContext.getKVS().put("IDF", word, "IDF", String.valueOf(idf));
-            FlamePair sortedPair = new FlamePair(word, String.join(",", urls));
-            flameContext.getKVS().put("index", sortedPair._1(), "link", sortedPair._2());
-
-            return Collections.singletonList(sortedPair);
-        });
-        sortLinks.drop();
-        reversedIndex.drop();
+            try {
+                flameContext.getKVS().put("IDF", word, "IDF", String.valueOf(idf));
+                flameContext.getKVS().put("index", word, "link", String.join(",", urls));
+            } catch (IOException e) {
+                logger.error(e.getMessage(), e);
+            }
+            return "";
+        }).drop();
 
         flameContext.output("OK");
     }

@@ -29,7 +29,7 @@ public class PageRank {
         }
         double t = Double.parseDouble(args[0]);
         double percent = args.length >= 2 ? Integer.parseInt(args[1]) / 100.0 : 1;
-        FlamePairRDD state = ctx.fromTable("crawl", row -> {
+        FlameRDD collect = ctx.fromTable("crawl", row -> {
             String url = Objects.requireNonNullElse(row.get("url"), "")
                 .replaceAll(",", URLEncoder.encode(","));
             try {
@@ -50,10 +50,12 @@ public class PageRank {
             } catch (MalformedURLException e) {
                 return (url.isBlank() ? "null" : url) + ",1.0,1.0,";
             }
-        }).mapToPair(e -> {
+        });
+        FlamePairRDD state = collect.mapToPair(e -> {
             String[] s = e.split(",", 2);
             return new FlamePair(s[0], s[1]);
         });
+        collect.drop();
 
         int iterations = 0;
         FlameRDD diffs;
